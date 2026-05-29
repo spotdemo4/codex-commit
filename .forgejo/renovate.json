@@ -6,7 +6,7 @@
   "requireConfig": "ignored",
   "platform": "forgejo",
   "endpoint": "https://trev.zip/api/v1",
-  "repositories": ["llc/rust"],
+  "repositories": ["llc/codex-commit"],
 
   // repository
   "extends": ["config:recommended"],
