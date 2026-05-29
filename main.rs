@@ -53,10 +53,13 @@ fn run() -> io::Result<()> {
 }
 
 fn run_codex(repo_dir: &Path, instructions: &str, output_path: &Path) -> io::Result<()> {
+    let model = latest_spark_model();
+    let model_label = model.as_deref().unwrap_or("default").to_owned();
+
     let mut command = Command::new("codex");
     command.args(["exec", "--cd"]).arg(repo_dir);
-    if let Some(model) = latest_spark_model() {
-        command.args(["--model", &model]);
+    if let Some(model) = &model {
+        command.args(["--model", model]);
     }
 
     let mut child = command
@@ -112,7 +115,8 @@ fn run_codex(repo_dir: &Path, instructions: &str, output_path: &Path) -> io::Res
         }
 
         print!(
-            "\r\x1b[Kcodex {} {} {}",
+            "\r\x1b[K{} {} {} {}",
+            model_label,
             frames[frame % frames.len()],
             activity,
             format_elapsed(started.elapsed())
