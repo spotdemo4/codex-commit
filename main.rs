@@ -108,7 +108,7 @@ fn run_codex(repo_dir: &Path, instructions: &str, output_path: &Path) -> io::Res
         }
 
         print!(
-            "\rcodex {} {} {}",
+            "\r\x1b[Kcodex {} {} {}",
             frames[frame % frames.len()],
             activity,
             format_elapsed(started.elapsed())
