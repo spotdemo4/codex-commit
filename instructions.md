@@ -6,7 +6,7 @@ Prefer returning only the subject line. Include a message body only when the sta
 
 Don't repeat information from the subject line in the message body.
 
-Only return the commit message in your response. Do not include any additional meta-commentary about the task. Do not include the raw diff output in the commit message.
+Only return the commit message in your response. Do not wrap it in quotes, Markdown, or a code block. Do not include any additional meta-commentary about the task. Do not include the raw diff output in the commit message.
 
 Follow the Conventional Commits format and good Git style:
 
