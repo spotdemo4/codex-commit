@@ -108,7 +108,7 @@
                   ./LICENSE
                   ./README.md
                   ./instructions.md
-                  (fileset.fileFilter (file: file.hasExt "rs") ./.)
+                  ./main.rs
                 ];
               };
               cargoHash = "sha256-iWBMNBZFnM7nC3eUug2hD6WCh/pcOCgqZgRpxRRNlds=";
