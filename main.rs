@@ -53,9 +53,13 @@ fn run() -> io::Result<()> {
 }
 
 fn run_codex(repo_dir: &Path, instructions: &str, output_path: &Path) -> io::Result<()> {
-    let mut child = Command::new("codex")
-        .args(["exec", "--cd"])
-        .arg(repo_dir)
+    let mut command = Command::new("codex");
+    command.args(["exec", "--cd"]).arg(repo_dir);
+    if let Some(model) = latest_spark_model() {
+        command.args(["--model", &model]);
+    }
+
+    let mut child = command
         .args(["--ephemeral", "--json", "--output-last-message"])
         .arg(output_path)
         .arg(instructions)
@@ -224,6 +228,49 @@ enum ThreadItem {
 #[derive(Deserialize)]
 struct FileUpdateChange {
     path: String,
+}
+
+#[derive(Deserialize)]
+struct ModelCatalog {
+    models: Vec<CodexModel>,
+}
+
+#[derive(Deserialize)]
+struct CodexModel {
+    slug: String,
+    priority: Option<u32>,
+    visibility: Option<String>,
+}
+
+fn latest_spark_model() -> Option<String> {
+    spark_model_from_args(["debug", "models"])
+        .or_else(|| spark_model_from_args(["debug", "models", "--bundled"]))
+}
+
+fn spark_model_from_args<const N: usize>(args: [&str; N]) -> Option<String> {
+    let output = Command::new("codex")
+        .args(args)
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let catalog: ModelCatalog = serde_json::from_slice(&output.stdout).ok()?;
+    catalog
+        .models
+        .into_iter()
+        .enumerate()
+        .filter(|(_, model)| model.is_available_spark())
+        .min_by_key(|(index, model)| (model.priority.unwrap_or(u32::MAX), *index))
+        .map(|(_, model)| model.slug)
+}
+
+impl CodexModel {
+    fn is_available_spark(&self) -> bool {
+        self.slug.contains("spark") && self.visibility.as_deref() != Some("hidden")
+    }
 }
 
 fn activity_from_event(line: &str) -> Option<String> {
