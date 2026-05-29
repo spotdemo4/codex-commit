@@ -51,6 +51,6 @@ jobs:
           shell: vulnerable
 
       - name: Run zizmor
-        run: zizmor .github
+        run: zizmor .forgejo
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
