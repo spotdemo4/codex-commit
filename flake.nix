@@ -65,7 +65,9 @@
 
           release = pkgs.mkShell {
             packages = with pkgs; [
+              cargo
               flake-release
+              rustc
             ];
           };
 
