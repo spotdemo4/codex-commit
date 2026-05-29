@@ -33,9 +33,9 @@ jobs:
           REGISTRY_PASSWORD: ${{ secrets.PACKAGE_TOKEN }}
           DELETE_OLD_RELEASE_ARTIFACTS: true
           PACKAGES: |
+            packages.x86_64-linux.default.x86_64-unknown-linux-musl
             packages.x86_64-linux.default.aarch64-unknown-linux-musl
             packages.x86_64-linux.default.armv7l-unknown-linux-musleabihf
-            packages.x86_64-linux.default.x86_64-unknown-linux-musl
 
       - name: Publish crate to Forgejo
         run: cargo publish --registry forgejo --locked # zizmor: ignore[use-trusted-publishing]

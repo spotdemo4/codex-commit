@@ -65,8 +65,8 @@
 
           release = pkgs.mkShell {
             packages = with pkgs; [
-              cargo
               flake-release
+              cargo
               rustc
             ];
           };
@@ -80,9 +80,9 @@
 
           vulnerable = pkgs.mkShell {
             packages = with pkgs; [
+              cargo-audit # rust
               flake-checker # nix
               zizmor # actions
-              cargo-audit # rust
             ];
           };
         };
