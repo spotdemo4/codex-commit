@@ -53,6 +53,7 @@
 
               # util
               bumper
+              fix-hash
             ];
           };
 
@@ -108,7 +109,7 @@
                   (fileset.fileFilter (file: file.hasExt "rs") ./.)
                 ];
               };
-              cargoLock.lockFile = ./Cargo.lock;
+              cargoHash = "sha256-iWBMNBZFnM7nC3eUug2hD6WCh/pcOCgqZgRpxRRNlds=";
 
               nativeCheckInputs = with pkgs; [
                 rustfmt

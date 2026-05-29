@@ -9,6 +9,8 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use serde::Deserialize;
+
 const INSTRUCTIONS: &str = include_str!("instructions.md");
 
 fn main() {
@@ -158,75 +160,170 @@ fn clear_line() -> io::Result<()> {
     io::stdout().flush()
 }
 
-fn activity_from_event(line: &str) -> Option<String> {
-    let event_type = json_string_field(line, "type")?;
+#[derive(Deserialize)]
+#[serde(tag = "type")]
+enum ThreadEvent {
+    #[serde(rename = "thread.started")]
+    ThreadStarted {},
+    #[serde(rename = "turn.started")]
+    TurnStarted {},
+    #[serde(rename = "turn.completed")]
+    TurnCompleted {},
+    #[serde(rename = "turn.failed")]
+    TurnFailed { error: ThreadError },
+    #[serde(rename = "item.started")]
+    ItemStarted { item: ThreadItem },
+    #[serde(rename = "item.updated")]
+    ItemUpdated { item: ThreadItem },
+    #[serde(rename = "item.completed")]
+    ItemCompleted { item: ThreadItem },
+    #[serde(rename = "error")]
+    Error { message: String },
+    #[serde(other)]
+    Unknown,
+}
 
-    match event_type.as_str() {
-        "thread.started" => Some("starting thread".to_owned()),
-        "turn.started" => Some("thinking".to_owned()),
-        "turn.completed" => Some("finished".to_owned()),
-        "turn.failed" => Some("failed".to_owned()),
-        "error" => json_string_field(line, "message")
-            .map(|message| format!("error: {}", truncate(&message, 80))),
-        "item.started" | "item.updated" | "item.completed" => activity_from_item(line, &event_type),
-        _ => None,
+#[derive(Deserialize)]
+struct ThreadError {
+    message: String,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ThreadItem {
+    AgentMessage {},
+    Reasoning {},
+    CommandExecution {
+        command: String,
+        status: String,
+    },
+    FileChange {
+        changes: Vec<FileUpdateChange>,
+        status: String,
+    },
+    McpToolCall {
+        server: String,
+        tool: String,
+        status: String,
+    },
+    CollabToolCall {
+        tool: String,
+        status: String,
+    },
+    WebSearch {
+        query: String,
+    },
+    TodoList {},
+    Error {
+        message: String,
+    },
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Deserialize)]
+struct FileUpdateChange {
+    path: String,
+}
+
+fn activity_from_event(line: &str) -> Option<String> {
+    match serde_json::from_str(line).ok()? {
+        ThreadEvent::ThreadStarted {} => Some("starting thread".to_owned()),
+        ThreadEvent::TurnStarted {} => Some("thinking".to_owned()),
+        ThreadEvent::TurnCompleted {} => Some("finished".to_owned()),
+        ThreadEvent::TurnFailed { error } => {
+            Some(format!("failed: {}", truncate(&error.message, 80)))
+        }
+        ThreadEvent::Error { message } => Some(format!("error: {}", truncate(&message, 80))),
+        ThreadEvent::ItemStarted { item } | ThreadEvent::ItemUpdated { item } => {
+            activity_from_item(item, false)
+        }
+        ThreadEvent::ItemCompleted { item } => activity_from_item(item, true),
+        ThreadEvent::Unknown => None,
     }
 }
 
-fn activity_from_item(line: &str, event_type: &str) -> Option<String> {
-    let item = json_object_field(line, "item")?;
-    let item_type = json_string_field(item, "type")?;
-
-    match item_type.as_str() {
-        "agent_message" => Some("writing commit message".to_owned()),
-        "reasoning" => Some("thinking".to_owned()),
-        "todo_list" => Some("planning".to_owned()),
-        "error" => json_string_field(item, "message")
-            .map(|message| format!("warning: {}", truncate(&message, 80))),
-        "web_search" => {
-            if event_type == "item.completed" {
+fn activity_from_item(item: ThreadItem, completed: bool) -> Option<String> {
+    match item {
+        ThreadItem::AgentMessage {} => Some("writing commit message".to_owned()),
+        ThreadItem::Reasoning {} => Some("thinking".to_owned()),
+        ThreadItem::TodoList {} => Some("planning".to_owned()),
+        ThreadItem::Error { message } => Some(format!("warning: {}", truncate(&message, 80))),
+        ThreadItem::WebSearch { query } => {
+            if completed {
                 Some("thinking".to_owned())
             } else {
-                json_string_field(item, "query")
-                    .map(|query| format!("searching web for {}", truncate(&query, 64)))
+                Some(format!("searching web for {}", truncate(&query, 64)))
             }
         }
-        "mcp_tool_call" => {
-            if event_type == "item.completed" {
+        ThreadItem::McpToolCall {
+            server,
+            tool,
+            status,
+        } => {
+            if is_completed(&status, completed) {
                 Some("thinking".to_owned())
+            } else if is_failed(&status) {
+                Some(format!("failed using {server}/{tool}"))
             } else {
-                let server = json_string_field(item, "server")?;
-                let tool = json_string_field(item, "tool")?;
                 Some(format!("using {server}/{tool}"))
             }
         }
-        "file_change" => Some(file_change_activity(item, event_type)),
-        "command_execution" => command_activity(item, event_type),
-        _ => None,
+        ThreadItem::CollabToolCall { tool, status } => {
+            if is_completed(&status, completed) {
+                Some("thinking".to_owned())
+            } else if is_failed(&status) {
+                Some(format!("failed {}", describe_collab_tool(&tool)))
+            } else {
+                Some(describe_collab_tool(&tool))
+            }
+        }
+        ThreadItem::FileChange { changes, status } => {
+            Some(file_change_activity(&changes, &status, completed))
+        }
+        ThreadItem::CommandExecution { command, status } => {
+            Some(command_activity(&command, &status, completed))
+        }
+        ThreadItem::Unknown => None,
     }
 }
 
-fn command_activity(item: &str, event_type: &str) -> Option<String> {
-    let status = json_string_field(item, "status");
-    if event_type == "item.completed" || status.as_deref() == Some("completed") {
-        return Some("thinking".to_owned());
+fn command_activity(command: &str, status: &str, completed: bool) -> String {
+    if is_completed(status, completed) {
+        return "thinking".to_owned();
     }
-    if matches!(status.as_deref(), Some("failed" | "declined")) {
-        return Some("command failed".to_owned());
+    if is_failed(status) {
+        return "command failed".to_owned();
     }
 
-    json_string_field(item, "command").map(|command| describe_command(&command))
+    describe_command(command)
 }
 
-fn file_change_activity(item: &str, event_type: &str) -> String {
-    let paths = json_string_fields(item, "path");
-    let target = describe_paths(&paths);
-    let status = json_string_field(item, "status");
+fn file_change_activity(changes: &[FileUpdateChange], status: &str, completed: bool) -> String {
+    let target = describe_file_change_paths(changes);
 
-    if event_type == "item.completed" || status.as_deref() == Some("completed") {
+    if is_completed(status, completed) {
         format!("updated {target}")
     } else {
         format!("editing {target}")
+    }
+}
+
+fn is_completed(status: &str, completed: bool) -> bool {
+    completed || status == "completed"
+}
+
+fn is_failed(status: &str) -> bool {
+    matches!(status, "failed" | "declined")
+}
+
+fn describe_collab_tool(tool: &str) -> String {
+    match tool {
+        "spawn_agent" => "spawning agent".to_owned(),
+        "send_input" => "sending agent input".to_owned(),
+        "wait" => "waiting on agent".to_owned(),
+        "close_agent" => "closing agent".to_owned(),
+        _ => format!("using collab tool {tool}"),
     }
 }
 
@@ -312,12 +409,12 @@ fn last_path_argument(words: &[String]) -> Option<&str> {
         .map(String::as_str)
 }
 
-fn describe_paths(paths: &[String]) -> String {
-    match paths {
+fn describe_file_change_paths(changes: &[FileUpdateChange]) -> String {
+    match changes {
         [] => "files".to_owned(),
-        [path] => path.clone(),
-        [first, second] => format!("{first}, {second}"),
-        [first, second, ..] => format!("{first}, {second}, ..."),
+        [change] => change.path.clone(),
+        [first, second] => format!("{}, {}", first.path, second.path),
+        [first, second, ..] => format!("{}, {}, ...", first.path, second.path),
     }
 }
 
@@ -350,91 +447,6 @@ fn shell_words(command: &str) -> Vec<String> {
     }
 
     words
-}
-
-fn json_object_field<'a>(input: &'a str, field: &str) -> Option<&'a str> {
-    let mut remaining = input;
-    let pattern = format!("\"{field}\"");
-
-    loop {
-        let index = remaining.find(&pattern)?;
-        let after_key = &remaining[index + pattern.len()..];
-        let after_colon = after_json_field_colon(after_key)?;
-        if after_colon.starts_with('{') {
-            return Some(after_colon);
-        }
-        remaining = after_key;
-    }
-}
-
-fn json_string_field(input: &str, field: &str) -> Option<String> {
-    json_string_fields(input, field).into_iter().next()
-}
-
-fn json_string_fields(input: &str, field: &str) -> Vec<String> {
-    let mut values = Vec::new();
-    let mut remaining = input;
-    let pattern = format!("\"{field}\"");
-
-    while let Some(index) = remaining.find(&pattern) {
-        let after_key = &remaining[index + pattern.len()..];
-        if let Some(after_colon) = after_json_field_colon(after_key)
-            && let Some((value, consumed)) = parse_json_string(after_colon)
-        {
-            values.push(value);
-            remaining = &after_colon[consumed..];
-            continue;
-        }
-        remaining = after_key;
-    }
-
-    values
-}
-
-fn after_json_field_colon(input: &str) -> Option<&str> {
-    let after_whitespace = input.trim_start();
-    let after_colon = after_whitespace.strip_prefix(':')?;
-    Some(after_colon.trim_start())
-}
-
-fn parse_json_string(input: &str) -> Option<(String, usize)> {
-    let mut chars = input.char_indices();
-    let (_, first) = chars.next()?;
-    if first != '"' {
-        return None;
-    }
-
-    let mut value = String::new();
-    while let Some((index, char)) = chars.next() {
-        match char {
-            '"' => return Some((value, index + char.len_utf8())),
-            '\\' => {
-                let (_, escaped) = chars.next()?;
-                match escaped {
-                    '"' | '\\' | '/' => value.push(escaped),
-                    'b' => value.push('\u{0008}'),
-                    'f' => value.push('\u{000c}'),
-                    'n' => value.push('\n'),
-                    'r' => value.push('\r'),
-                    't' => value.push('\t'),
-                    'u' => value.push(parse_json_unicode_escape(&mut chars)?),
-                    _ => return None,
-                }
-            }
-            _ => value.push(char),
-        }
-    }
-
-    None
-}
-
-fn parse_json_unicode_escape(chars: &mut std::str::CharIndices<'_>) -> Option<char> {
-    let mut value = 0;
-    for _ in 0..4 {
-        let (_, char) = chars.next()?;
-        value = value * 16 + char.to_digit(16)?;
-    }
-    char::from_u32(value)
 }
 
 fn truncate(value: &str, max_chars: usize) -> String {
