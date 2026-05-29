@@ -1,10 +1,12 @@
 use std::{
     env,
     fs::{self, OpenOptions},
-    io::{self, Write},
+    io::{self, BufRead, BufReader, Write},
     path::{Path, PathBuf},
     process::{self, Command, ExitStatus, Stdio},
-    time::{SystemTime, UNIX_EPOCH},
+    sync::mpsc,
+    thread,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 const INSTRUCTIONS: &str = include_str!("instructions.md");
@@ -24,19 +26,7 @@ fn run() -> io::Result<()> {
     env::set_current_dir(&repo_dir)?;
     run_command(Command::new("git").args(["add", "."]), "git add .")?;
 
-    print!("thinking...");
-    io::stdout().flush()?;
-
-    let status = Command::new("codex")
-        .args(["exec", "--cd"])
-        .arg(&repo_dir)
-        .args(["--ephemeral", "--output-last-message"])
-        .arg(commit_file.path())
-        .arg(instructions)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()?;
-    ensure_success(status, "codex exec")?;
+    run_codex(&repo_dir, &instructions, commit_file.path())?;
 
     let mut commit = fs::read_to_string(commit_file.path())?;
     trim_trailing_newlines(&mut commit);
@@ -58,6 +48,74 @@ fn run() -> io::Result<()> {
         Command::new("git").arg("commit").arg("-m").arg(commit),
         "git commit",
     )
+}
+
+fn run_codex(repo_dir: &Path, instructions: &str, output_path: &Path) -> io::Result<()> {
+    let mut child = Command::new("codex")
+        .args(["exec", "--cd"])
+        .arg(repo_dir)
+        .args(["--ephemeral", "--json", "--output-last-message"])
+        .arg(output_path)
+        .arg(instructions)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| io::Error::other("could not read codex stdout"))?;
+    let (event_sender, events) = mpsc::channel();
+
+    thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            let event = line.map_err(|error| error.to_string());
+            if event_sender.send(event).is_err() {
+                break;
+            }
+        }
+    });
+
+    let frames = ["-", "\\", "|", "/"];
+    let started = Instant::now();
+    let mut activity = "starting codex".to_owned();
+    let mut read_error = None;
+    let mut frame = 0;
+
+    loop {
+        while let Ok(event) = events.try_recv() {
+            match event {
+                Ok(line) => {
+                    if let Some(next_activity) = activity_from_event(&line) {
+                        activity = next_activity;
+                    }
+                }
+                Err(error) => {
+                    read_error = Some(error);
+                }
+            }
+        }
+
+        if let Some(status) = child.try_wait()? {
+            clear_line()?;
+            if let Some(error) = read_error {
+                return Err(io::Error::other(format!(
+                    "failed to read codex json output: {error}"
+                )));
+            }
+            return ensure_success(status, "codex exec");
+        }
+
+        print!(
+            "\rcodex {} {} {}",
+            frames[frame % frames.len()],
+            activity,
+            format_elapsed(started.elapsed())
+        );
+        io::stdout().flush()?;
+
+        frame += 1;
+        thread::sleep(Duration::from_millis(250));
+    }
 }
 
 fn repo_dir() -> io::Result<PathBuf> {
@@ -88,6 +146,305 @@ fn instructions() -> String {
     let mut instructions = INSTRUCTIONS.to_owned();
     trim_trailing_newlines(&mut instructions);
     instructions
+}
+
+fn format_elapsed(elapsed: Duration) -> String {
+    let seconds = elapsed.as_secs();
+    format!("{:02}:{:02}", seconds / 60, seconds % 60)
+}
+
+fn clear_line() -> io::Result<()> {
+    print!("\r\x1b[K");
+    io::stdout().flush()
+}
+
+fn activity_from_event(line: &str) -> Option<String> {
+    let event_type = json_string_field(line, "type")?;
+
+    match event_type.as_str() {
+        "thread.started" => Some("starting thread".to_owned()),
+        "turn.started" => Some("thinking".to_owned()),
+        "turn.completed" => Some("finished".to_owned()),
+        "turn.failed" => Some("failed".to_owned()),
+        "error" => json_string_field(line, "message")
+            .map(|message| format!("error: {}", truncate(&message, 80))),
+        "item.started" | "item.updated" | "item.completed" => activity_from_item(line, &event_type),
+        _ => None,
+    }
+}
+
+fn activity_from_item(line: &str, event_type: &str) -> Option<String> {
+    let item = json_object_field(line, "item")?;
+    let item_type = json_string_field(item, "type")?;
+
+    match item_type.as_str() {
+        "agent_message" => Some("writing commit message".to_owned()),
+        "reasoning" => Some("thinking".to_owned()),
+        "todo_list" => Some("planning".to_owned()),
+        "error" => json_string_field(item, "message")
+            .map(|message| format!("warning: {}", truncate(&message, 80))),
+        "web_search" => {
+            if event_type == "item.completed" {
+                Some("thinking".to_owned())
+            } else {
+                json_string_field(item, "query")
+                    .map(|query| format!("searching web for {}", truncate(&query, 64)))
+            }
+        }
+        "mcp_tool_call" => {
+            if event_type == "item.completed" {
+                Some("thinking".to_owned())
+            } else {
+                let server = json_string_field(item, "server")?;
+                let tool = json_string_field(item, "tool")?;
+                Some(format!("using {server}/{tool}"))
+            }
+        }
+        "file_change" => Some(file_change_activity(item, event_type)),
+        "command_execution" => command_activity(item, event_type),
+        _ => None,
+    }
+}
+
+fn command_activity(item: &str, event_type: &str) -> Option<String> {
+    let status = json_string_field(item, "status");
+    if event_type == "item.completed" || status.as_deref() == Some("completed") {
+        return Some("thinking".to_owned());
+    }
+    if matches!(status.as_deref(), Some("failed" | "declined")) {
+        return Some("command failed".to_owned());
+    }
+
+    json_string_field(item, "command").map(|command| describe_command(&command))
+}
+
+fn file_change_activity(item: &str, event_type: &str) -> String {
+    let paths = json_string_fields(item, "path");
+    let target = describe_paths(&paths);
+    let status = json_string_field(item, "status");
+
+    if event_type == "item.completed" || status.as_deref() == Some("completed") {
+        format!("updated {target}")
+    } else {
+        format!("editing {target}")
+    }
+}
+
+fn describe_command(command: &str) -> String {
+    let words = shell_words(command);
+    let Some(program) = words.first().map(String::as_str) else {
+        return "running command".to_owned();
+    };
+
+    match program {
+        "git" => describe_git_command(&words),
+        "rg" => describe_rg_command(&words),
+        "sed" | "cat" | "nl" | "head" | "tail" => {
+            if let Some(path) = last_path_argument(&words) {
+                format!("reading {path}")
+            } else {
+                format!("running {}", truncate(command, 80))
+            }
+        }
+        "ls" | "find" => "listing files".to_owned(),
+        "nix" => describe_nix_command(&words),
+        "cargo" => describe_cargo_command(&words),
+        _ => format!("running {}", truncate(command, 80)),
+    }
+}
+
+fn describe_git_command(words: &[String]) -> String {
+    match words.get(1).map(String::as_str) {
+        Some("status") => "checking git status".to_owned(),
+        Some("diff") => {
+            let staged = words
+                .iter()
+                .any(|word| matches!(word.as_str(), "--cached" | "--staged"));
+            if staged {
+                "inspecting staged diff".to_owned()
+            } else if let Some(path) = last_path_argument(words) {
+                format!("inspecting diff for {path}")
+            } else {
+                "inspecting diff".to_owned()
+            }
+        }
+        Some("show") => "inspecting git object".to_owned(),
+        Some("log") => "reading git history".to_owned(),
+        _ => format!("running {}", truncate(&words.join(" "), 80)),
+    }
+}
+
+fn describe_rg_command(words: &[String]) -> String {
+    if words.iter().any(|word| word == "--files") {
+        "listing tracked files".to_owned()
+    } else if let Some(pattern) = words.iter().skip(1).find(|word| !word.starts_with('-')) {
+        format!("searching files for {}", truncate(pattern, 48))
+    } else {
+        "searching files".to_owned()
+    }
+}
+
+fn describe_nix_command(words: &[String]) -> String {
+    match (
+        words.get(1).map(String::as_str),
+        words.get(2).map(String::as_str),
+    ) {
+        (Some("flake"), Some("check")) => "running nix flake check".to_owned(),
+        (Some("fmt"), _) => "formatting with nix".to_owned(),
+        _ => format!("running {}", truncate(&words.join(" "), 80)),
+    }
+}
+
+fn describe_cargo_command(words: &[String]) -> String {
+    match words.get(1).map(String::as_str) {
+        Some("test") => "running cargo test".to_owned(),
+        Some("clippy") => "running clippy".to_owned(),
+        Some("fmt") => "formatting Rust".to_owned(),
+        _ => format!("running {}", truncate(&words.join(" "), 80)),
+    }
+}
+
+fn last_path_argument(words: &[String]) -> Option<&str> {
+    words
+        .iter()
+        .rev()
+        .find(|word| !word.starts_with('-') && !word.contains('='))
+        .map(String::as_str)
+}
+
+fn describe_paths(paths: &[String]) -> String {
+    match paths {
+        [] => "files".to_owned(),
+        [path] => path.clone(),
+        [first, second] => format!("{first}, {second}"),
+        [first, second, ..] => format!("{first}, {second}, ..."),
+    }
+}
+
+fn shell_words(command: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut chars = command.chars();
+    let mut quote = None;
+
+    while let Some(char) = chars.next() {
+        match (quote, char) {
+            (None, '\'' | '"') => quote = Some(char),
+            (Some(current), char) if char == current => quote = None,
+            (_, '\\') => {
+                if let Some(next) = chars.next() {
+                    word.push(next);
+                }
+            }
+            (None, char) if char.is_whitespace() => {
+                if !word.is_empty() {
+                    words.push(std::mem::take(&mut word));
+                }
+            }
+            (_, char) => word.push(char),
+        }
+    }
+
+    if !word.is_empty() {
+        words.push(word);
+    }
+
+    words
+}
+
+fn json_object_field<'a>(input: &'a str, field: &str) -> Option<&'a str> {
+    let mut remaining = input;
+    let pattern = format!("\"{field}\"");
+
+    loop {
+        let index = remaining.find(&pattern)?;
+        let after_key = &remaining[index + pattern.len()..];
+        let after_colon = after_json_field_colon(after_key)?;
+        if after_colon.starts_with('{') {
+            return Some(after_colon);
+        }
+        remaining = after_key;
+    }
+}
+
+fn json_string_field(input: &str, field: &str) -> Option<String> {
+    json_string_fields(input, field).into_iter().next()
+}
+
+fn json_string_fields(input: &str, field: &str) -> Vec<String> {
+    let mut values = Vec::new();
+    let mut remaining = input;
+    let pattern = format!("\"{field}\"");
+
+    while let Some(index) = remaining.find(&pattern) {
+        let after_key = &remaining[index + pattern.len()..];
+        if let Some(after_colon) = after_json_field_colon(after_key)
+            && let Some((value, consumed)) = parse_json_string(after_colon)
+        {
+            values.push(value);
+            remaining = &after_colon[consumed..];
+            continue;
+        }
+        remaining = after_key;
+    }
+
+    values
+}
+
+fn after_json_field_colon(input: &str) -> Option<&str> {
+    let after_whitespace = input.trim_start();
+    let after_colon = after_whitespace.strip_prefix(':')?;
+    Some(after_colon.trim_start())
+}
+
+fn parse_json_string(input: &str) -> Option<(String, usize)> {
+    let mut chars = input.char_indices();
+    let (_, first) = chars.next()?;
+    if first != '"' {
+        return None;
+    }
+
+    let mut value = String::new();
+    while let Some((index, char)) = chars.next() {
+        match char {
+            '"' => return Some((value, index + char.len_utf8())),
+            '\\' => {
+                let (_, escaped) = chars.next()?;
+                match escaped {
+                    '"' | '\\' | '/' => value.push(escaped),
+                    'b' => value.push('\u{0008}'),
+                    'f' => value.push('\u{000c}'),
+                    'n' => value.push('\n'),
+                    'r' => value.push('\r'),
+                    't' => value.push('\t'),
+                    'u' => value.push(parse_json_unicode_escape(&mut chars)?),
+                    _ => return None,
+                }
+            }
+            _ => value.push(char),
+        }
+    }
+
+    None
+}
+
+fn parse_json_unicode_escape(chars: &mut std::str::CharIndices<'_>) -> Option<char> {
+    let mut value = 0;
+    for _ in 0..4 {
+        let (_, char) = chars.next()?;
+        value = value * 16 + char.to_digit(16)?;
+    }
+    char::from_u32(value)
+}
+
+fn truncate(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars();
+    let truncated: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{truncated}...")
+    } else {
+        truncated
+    }
 }
 
 fn run_command(command: &mut Command, label: &str) -> io::Result<()> {
