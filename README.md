@@ -6,7 +6,18 @@
 
 generates commit messages with the codex cli
 
-## use
+### example
+
+```console
+$ codex-commit
+feat: add commit message generator
+:
+```
+
+Press enter to use the generated message, or type a replacement at the `:`
+prompt before committing.
+
+## get
 
 ### nix
 
