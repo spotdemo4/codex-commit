@@ -104,6 +104,7 @@
                   ./Cargo.toml
                   ./LICENSE
                   ./README.md
+                  ./instructions.md
                   (fileset.fileFilter (file: file.hasExt "rs") ./.)
                 ];
               };
