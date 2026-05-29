@@ -182,8 +182,8 @@
           };
 
           renovate = {
-            root = ./.github;
-            fileset = ./.github/renovate.json;
+            root = ./.forgejo;
+            fileset = ./.forgejo/renovate.json;
             packages = with pkgs; [
               renovate
             ];
