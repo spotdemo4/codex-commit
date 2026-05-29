@@ -6,8 +6,6 @@
 
 generates commit messages with the codex cli
 
-### example
-
 ```console
 $ codex-commit
 feat: add commit message generator
@@ -17,7 +15,14 @@ feat: add commit message generator
 Press enter to use the generated message, or type a replacement at the `:`
 prompt before committing.
 
-## get
+## install
+
+### cargo
+
+```sh
+cargo install codex-commit \
+  --index sparse+https://trev.zip/api/packages/llc/cargo/
+```
 
 ### nix
 
@@ -28,8 +33,3 @@ nix run git+https://trev.zip/llc/codex-commit.git
 ### download
 
 https://trev.zip/llc/codex-commit/releases
-
----
-
-> [!NOTE]
-> This repository is mirrored to GitHub from [trev.zip](https://trev.zip/llc/codex-commit)
