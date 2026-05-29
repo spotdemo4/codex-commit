@@ -1,5 +1,5 @@
 {
-  description = "template for rust";
+  description = "codex commit message generator";
 
   nixConfig = {
     extra-substituters = [
@@ -94,8 +94,8 @@
         packages = {
           default = pkgs.rustPlatform.buildRustPackage (
             final: with pkgs.lib; {
-              pname = "rust-template";
-              version = "0.7.0";
+              pname = "codex-commit";
+              version = "0.0.1";
 
               src = fileset.toSource {
                 root = ./.;
@@ -120,8 +120,8 @@
               '';
 
               meta = {
-                mainProgram = "rust-template";
-                description = "template for rust";
+                mainProgram = "codex-commit";
+                description = "codex commit message generator";
                 license = licenses.mit;
                 platforms = platforms.all;
                 homepage = "https://trev.zip/llc/rust";
@@ -171,11 +171,7 @@
           };
 
           actions = {
-            root = ./.;
-            files = [
-              ./.forgejo/workflows
-              ./.github/workflows
-            ];
+            root = ./.forgejo/workflows;
             filter = file: file.hasExt "yaml";
             packages = with pkgs; [
               zizmor

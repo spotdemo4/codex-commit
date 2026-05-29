@@ -1,18 +1,18 @@
 [package]
-name = "rust-template"
-version = "0.7.0"
+name = "codex-commit"
+version = "0.0.1"
 edition = "2024"
 rust-version = "1.94.1"
-description = "template for rust"
+description = "codex commit message generator"
 readme = "README.md"
-repository = "https://trev.zip/llc/rust"
+repository = "https://trev.zip/llc/codex-commit"
 license-file = "LICENSE"
 
 [lints.clippy]
 pedantic = "warn"
 
 [[bin]]
-name = "rust-template"
+name = "codex-commit"
 path = "main.rs"
 
 [dependencies]

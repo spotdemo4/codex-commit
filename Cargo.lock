@@ -3,5 +3,5 @@
 version = 4
 
 [[package]]
-name = "rust-template"
-version = "0.7.0"
+name = "codex-commit"
+version = "0.0.1"
